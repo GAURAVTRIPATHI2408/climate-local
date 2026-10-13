@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}ClimateWatch Local{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+<header class="nav wrap"><a class="brand" href="{{ url_for('index') }}"><span class="brand-icon">◉</span> ClimateWatch <em>Local</em></a>
+<nav><a href="{{ url_for('weather') }}">Live Weather</a><a href="{{ url_for('compare') }}">Compare Cities</a><a href="{{ url_for('report_issue') }}">Report an Issue</a><a href="{{ url_for('dashboard') }}">Dashboard</a></nav></header>
+<main>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="wrap flashes">{% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}{% endwith %}
+{% block content %}{% endblock %}</main>
+<footer class="wrap footer"><div><strong>ClimateWatch Local</strong><p>Local weather insights and climate awareness for Indian cities.</p></div><small>Educational project · Weather data: Open-Meteo · Risk indicators are simplified estimates, not official alerts.</small></footer>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% block scripts %}{% endblock %}
+</body></html>

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ClimateWatch Local: ward-level weather and climate risk</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#fbf8ff;--bg2:linear-gradient(165deg,#ffe7f1 0%,#e9e4ff 50%,#d6f6ff 100%);--ink:#241a4a;--mute:#6b6495;--card:rgba(255,255,255,.8);--line:rgba(120,90,200,.18);--ac:#7c3aed;--ac2:#ff5fa2;--chip:rgba(124,58,237,.08);--grad:linear-gradient(135deg,#7c3aed,#ff5fa2);
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#140f33;--bg2:linear-gradient(165deg,#140f33 0%,#241552 55%,#0f2a4a 100%);--ink:#f1ecff;--mute:#b3a9dd;--card:rgba(40,28,92,.7);--line:rgba(190,170,255,.2);--ac:#b794ff;--chip:rgba(255,255,255,.08)}}
+:root[data-theme="dark"]{--bg:#140f33;--bg2:linear-gradient(165deg,#140f33 0%,#241552 55%,#0f2a4a 100%);--ink:#f1ecff;--mute:#b3a9dd;--card:rgba(40,28,92,.7);--line:rgba(190,170,255,.2);--ac:#b794ff;--chip:rgba(255,255,255,.08)}
+html{scroll-padding-top:env(safe-area-inset-top,0px);scroll-behavior:smooth}*{box-sizing:border-box}
+body{margin:0;background:var(--bg2);background-attachment:fixed;color:var(--ink);font:400 16px/1.6 'Instrument Sans',system-ui,sans-serif}
+h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;line-height:1.1;margin:0}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:18px 0;gap:12px;flex-wrap:wrap}
+.logo{font:800 20px 'Bricolage Grotesque';display:flex;align-items:center;gap:10px}
+.logo i{width:26px;height:26px;border-radius:50% 50% 50% 4px;background:var(--grad);transform:rotate(-45deg)}
+nav a{text-decoration:none;color:var(--mute);font-weight:500;margin-left:20px}
+nav a:hover,a:focus-visible,button:focus-visible{color:var(--ac);outline:2px solid var(--ac);outline-offset:3px}
+.btn{display:inline-block;text-decoration:none;color:#fff!important;background:var(--grad);padding:14px 26px;border-radius:999px;font:700 16px 'Instrument Sans';box-shadow:0 10px 26px rgba(124,58,237,.35);margin-left:0!important}
+.btn.ghost{background:transparent;color:var(--ink)!important;border:1.5px solid var(--ac);box-shadow:none}
+.hero{display:grid;grid-template-columns:1.1fr 1fr;gap:40px;align-items:center;padding:30px 0 70px}
+@media(max-width:860px){.hero{grid-template-columns:1fr}}
+.hero h1{font-size:clamp(38px,6vw,64px);font-weight:800;letter-spacing:-.02em}
+.hero h1 span{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{color:var(--mute);font-size:19px;max-width:520px;margin:18px 0 26px}
+.cta{display:flex;gap:12px;flex-wrap:wrap}
+.note{font-size:13px;color:var(--mute);margin-top:14px}
+/* phone */
+.stage{display:flex;flex-direction:column;align-items:center;gap:16px}
+.phone{width:290px;height:560px;border-radius:42px;background:#1b1240;padding:10px;box-shadow:0 30px 60px rgba(124,58,237,.35)}
+.screen{width:100%;height:100%;border-radius:33px;overflow:hidden;background:linear-gradient(165deg,#ffe7f1,#e9e4ff 55%,#d6f6ff);color:#241a4a;padding:16px 14px;position:relative}
+.screen>div{display:none}.screen>div.on{display:block}
+.mh{border-radius:22px;padding:16px;color:#fff;background:linear-gradient(145deg,#2b1b8a,#7c3aed 55%,#ff5fa2)}
+.mh b{font:800 56px/1 'Bricolage Grotesque';display:block;margin-top:10px}.mh small{font-size:12px;opacity:.9}
+.mc{background:rgba(255,255,255,.85);border-radius:16px;padding:10px 12px;margin-top:10px;font-size:12.5px}
+.mc h4{margin:0 0 6px;font:700 13px 'Bricolage Grotesque'}
+.hrs{display:flex;gap:6px}.hrs span{flex:1;text-align:center;font-size:11px;background:#f1ebff;border-radius:10px;padding:5px 0}.hrs b{display:block;font-size:13px}
+.pl{display:inline-block;font:700 11px 'Instrument Sans';color:#fff;border-radius:999px;padding:2px 10px}
+.g{background:linear-gradient(90deg,#12b886,#38d9a9)}.y{background:linear-gradient(90deg,#f59f00,#ffc53d);color:#4a2f00}.r{background:linear-gradient(90deg,#ff6b3d,#ff4f7b)}
+.gauge{height:10px;border-radius:5px;background:linear-gradient(90deg,#12b886,#f59f00,#ff4f7b,#8b1fd1);position:relative;margin:10px 0}.gauge i{position:absolute;top:-4px;left:38%;width:5px;height:18px;border-radius:3px;background:#241a4a}
+.rb{height:6px;border-radius:3px;background:#e4daff;margin-top:3px}.rb i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,#7c3aed,#ff5fa2)}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.tabs button{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:8px 16px;font:600 14px 'Instrument Sans';cursor:pointer}
+.tabs button[aria-pressed=true]{background:var(--grad);color:#fff;border-color:transparent}
+section{padding:0 0 80px}
+h2{font-size:clamp(28px,4vw,42px);margin-bottom:10px}
+.lead{color:var(--mute);max-width:620px;margin:0 0 28px;font-size:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:22px;backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(124,58,237,.08)}
+.card h3{font-size:20px;margin:10px 0 6px}.card p{margin:0;color:var(--mute);font-size:15px}
+.ico{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;font-size:24px;background:var(--chip)}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;counter-reset:s}
+.steps .card:before{counter-increment:s;content:counter(s);display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--grad);color:#fff;font:800 18px 'Bricolage Grotesque'}
+.pillrow{display:flex;gap:10px;flex-wrap:wrap}.pillrow span{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:8px 16px;font-weight:600;font-size:14px}
+.band{border-radius:30px;padding:46px 28px;text-align:center;color:#fff;background:linear-gradient(135deg,#2b1b8a,#7c3aed 55%,#ff5fa2);box-shadow:0 20px 50px rgba(124,58,237,.35)}
+.band h2{color:#fff}.band p{max-width:520px;margin:10px auto 24px;opacity:.92}
+.band .btn{background:#fff;color:#2b1b8a!important;box-shadow:none}
+footer{padding:30px 0 40px;color:var(--mute);font-size:14px;text-align:center}
+</style></head><body>
+<div class="wrap">
+<nav><div class="logo"><i></i>ClimateWatch Local</div><div><a href="#features">Features</a><a href="#how">How it works</a><a href="{{ url_for('compare') }}">Compare Cities</a><a href="{{ url_for('dashboard') }}">Dashboard</a></div></nav>
+
+<div class="hero">
+ <div>
+  <h1>Know what the weather will do to <span>your ward.</span></h1>
+  <p>ClimateWatch Local combines a mobile weather forecast with ward-level flood, heat, drought and landslide risk, so you get advice you can act on today.</p>
+  <div class="cta"><a class="btn" href="{{ url_for('weather', city='Virar') }}">Open the live demo</a><a class="btn ghost" href="#features">See features</a><a class="btn ghost" href="{{ url_for('report_issue') }}">Report local issue</a></div>
+  <div class="note">Demo for Vasai–Virar, Palghar. Uses a real forecast snapshot plus sample risk data.</div>
+ </div>
+ <div class="stage">
+  <div class="phone"><div class="screen" id="scr">
+   <div class="on" data-s="0">
+    <div class="mh"><small>Virar West · Today</small><b>34°</b><small>Clear · Feels 37°</small></div>
+    <div class="mc"><h4>Next hours</h4><div class="hrs"><span>7pm<b>31°</b></span><span>9pm<b>29°</b></span><span>11pm<b>28°</b></span><span>1am<b>27°</b></span></div></div>
+    <div class="mc"><h4>8-day forecast</h4>Rain chance 0–10%. Highs of 33–34°C all week.</div>
+   </div>
+   <div data-s="1">
+    <div class="mc" style="margin:0"><h4>My Area Safety</h4>Overall risk today <span class="pl y">Moderate</span><div class="gauge"><i></i></div>Avoid outdoor work 12–4 pm. No flood threat in 8 days.</div>
+    <div class="mc"><h4>Nearby</h4>🏠 Shelter · 🏥 Hospital · 💧 Water point</div>
+    <div class="mc" style="background:linear-gradient(135deg,#ff6b3d,#e11d74);color:#fff;text-align:center;font-weight:700">📸 Report waterlogging</div>
+   </div>
+   <div data-s="2">
+    <div class="mc" style="margin:0"><h4>What if 2050?</h4>+2°C · +15% rain · 0.3 m sea level</div>
+    <div class="mc"><b>Nalasopara West</b> 85 → 96<div class="rb"><i style="width:96%"></i></div></div>
+    <div class="mc"><b>Virar West</b> 78 → 90<div class="rb"><i style="width:90%"></i></div></div>
+    <div class="mc"><b>Nalasopara East</b> 78 → 96<div class="rb"><i style="width:96%"></i></div></div>
+   </div>
+   <div data-s="3">
+    <div class="mc" style="margin:0"><h4>Alerts</h4><span class="pl y">Warm day</span> Max 34°C. Drink water often.</div>
+    <div class="mc"><span class="pl g">Clear</span> No heavy rain expected.</div>
+    <div class="mc"><h4>Send alerts by</h4>Push · SMS · WhatsApp · Voice · Email</div>
+   </div>
+  </div></div>
+  <div class="tabs" id="tabs"></div>
+ </div>
+</div>
+
+<section id="features"><h2>Everything you need before the weather turns</h2><p class="lead">Built for people who need to decide what to do, not just read numbers.</p>
+<div class="grid">
+ <div class="card"><div class="ico">🌤️</div><h3>Mobile weather forecast</h3><p>Current conditions, hourly and 8-day forecast, feels-like temperature, humidity, wind, UV and sunrise.</p></div>
+ <div class="card"><div class="ico">🛟</div><h3>My Area Safety</h3><p>A daily risk meter with plain advice, plus a map of shelters, hospitals and water points.</p></div>
+ <div class="card"><div class="ico">🔮</div><h3>What-if simulator</h3><p>Try more heat, rain or sea-level rise and see which wards become high risk first.</p></div>
+ <div class="card"><div class="ico">🔔</div><h3>Personal alerts</h3><p>Set your home type, age group and job to get warnings that fit you, by push, SMS, WhatsApp or voice.</p></div>
+ <div class="card"><div class="ico">📸</div><h3>Citizen reports</h3><p>Report waterlogging or damage with photo, location and voice. Neighbours confirm it, so reports stay trustworthy.</p></div>
+ <div class="card"><div class="ico">🗣️</div><h3>Ask in your language</h3><p>Question box for Hindi, Marathi and English, plus an offline pack and emergency numbers.</p></div>
+</div></section>
+
+<section id="how"><h2>How it works</h2><p class="lead">From raw data to a clear action in three steps.</p>
+<div class="steps">
+ <div class="card"><h3>Collect</h3><p>Weather from IMD or Open-Meteo, satellite and land-use layers, census data and citizen reports.</p></div>
+ <div class="card"><h3>Analyse</h3><p>Trend analysis, flood and heat models, and a vulnerability index for every ward.</p></div>
+ <div class="card"><h3>Act</h3><p>Alerts, safe places and adaptation tips such as drain cleaning, shade trees and water storage.</p></div>
+</div></section>
+
+<section id="who"><h2>Who it is for</h2><p class="lead">One app, different needs.</p>
+<div class="pillrow"><span>Municipal officers</span><span>Disaster-management teams</span><span>Farmers</span><span>NGOs</span><span>Outdoor workers</span><span>Students</span><span>Residents</span></div></section>
+
+<section id="tech"><h2>Technology</h2><p class="lead">A data-science stack from data pipeline to map.</p>
+<div class="pillrow"><span>Python</span><span>Pandas and GeoPandas</span><span>Rasterio</span><span>scikit-learn and XGBoost</span><span>CNN for photos</span><span>PostgreSQL + PostGIS</span><span>FastAPI</span><span>React or Streamlit</span><span>Leaflet maps</span></div></section>
+
+<section><div class="band"><h2>See it working</h2><p>Open the interactive demo and try the forecast, safety map and what-if simulator.</p><a class="btn" href="{{ url_for('weather', city='Virar') }}">Open the live demo</a></div></section>
+</div>
+<footer>ClimateWatch Local · Educational project · Live weather via Open-Meteo · Simplified indicators are not official alerts</footer>
+<script>
+var names=['Weather','Safety','What-if','Alerts'],sc=document.querySelectorAll('#scr>div'),tb=document.getElementById('tabs');
+names.forEach(function(n,i){var b=document.createElement('button');b.textContent=n;b.setAttribute('aria-pressed',i==0);b.onclick=function(){sc.forEach(function(s,j){s.classList.toggle('on',i==j)});tb.querySelectorAll('button').forEach(function(x,j){x.setAttribute('aria-pressed',i==j)})};tb.appendChild(b)});
+</script></body></html>
