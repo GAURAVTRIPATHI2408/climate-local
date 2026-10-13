@@ -1,12 +1,31 @@
+
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-import sqlite3, os, requests
+import sqlite3
+import os
+import logging
+import requests
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-before-public-deployment")
-DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "climatewatch.db"))
 
-# Approximate coordinates for commonly searched Indian cities. Add more as needed.
+app.secret_key = os.environ.get(
+    "SECRET_KEY",
+    "change-this-secret-before-public-deployment"
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_PATH = os.environ.get(
+    "DATABASE_PATH",
+    os.path.join(BASE_DIR, "climatewatch.db")
+)
+
+# Configure useful logs for Render
+logging.basicConfig(level=logging.INFO)
+
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Supported Indian cities and approximate city-centre coordinates
 CITIES = {
     "Mumbai": (19.0760, 72.8777, "Maharashtra"),
     "Virar": (19.4559, 72.8114, "Maharashtra"),
@@ -49,123 +68,457 @@ CITIES = {
     "Kanpur": (26.4499, 80.3319, "Uttar Pradesh"),
 }
 
+
+# --------------------------------------------------
+# DATABASE
+# --------------------------------------------------
+
 def connect_db():
-    conn = sqlite3.connect(DB_PATH)
+    folder = os.path.dirname(DB_PATH)
+
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def init_db():
     with connect_db() as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS searches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL, temperature REAL, humidity REAL, rain REAL,
-            searched_at TEXT NOT NULL
-        )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS citizen_reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL, issue TEXT NOT NULL, details TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )""")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS searches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                temperature REAL,
+                humidity REAL,
+                rain REAL,
+                searched_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS citizen_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                issue TEXT NOT NULL,
+                details TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+
+# --------------------------------------------------
+# CITY HELPERS
+# --------------------------------------------------
+
+def resolve_city(city):
+    """Match city names without case-sensitivity or extra spaces."""
+    if not city:
+        return None
+
+    cleaned = city.strip().casefold()
+
+    for name in CITIES:
+        if name.casefold() == cleaned:
+            return name
+
+    return None
+
+
+# --------------------------------------------------
+# WEATHER API
+# --------------------------------------------------
 
 def weather_for(city):
-    if city not in CITIES:
-        raise ValueError("Please select a city from the list.")
+    city = resolve_city(city)
+
+    if city is None:
+        raise ValueError(
+            "City not found. Please select a supported city."
+        )
+
     lat, lon, state = CITIES[city]
-    url = "https://api.open-meteo.com/v1/forecast"
+
     params = {
-        "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,wind_speed_10m,weather_code",
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max",
-        "timezone": "auto", "forecast_days": 7
+        "latitude": lat,
+        "longitude": lon,
+        "current": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "apparent_temperature,"
+            "is_day,"
+            "precipitation,"
+            "rain,"
+            "wind_speed_10m,"
+            "weather_code"
+        ),
+        "daily": (
+            "temperature_2m_max,"
+            "temperature_2m_min,"
+            "precipitation_probability_max,"
+            "uv_index_max"
+        ),
+        "timezone": "auto",
+        "forecast_days": 7
     }
-    response = requests.get(url, params=params, timeout=12)
+
+    # Timeout prevents a slow API from blocking the page indefinitely.
+    response = requests.get(
+        WEATHER_URL,
+        params=params,
+        timeout=(5, 20),
+        headers={"User-Agent": "ClimateWatchLocal/1.0"}
+    )
+
     response.raise_for_status()
+
     data = response.json()
-    current = data.get("current", {})
-    daily = data.get("daily", {})
+
+    # Open-Meteo can return an error object even when debugging
+    # a provider response. Validate the required sections.
+    if data.get("error"):
+        raise ValueError(
+            data.get("reason", "Weather provider returned an error.")
+        )
+
+    current = data.get("current")
+    daily = data.get("daily")
+
+    if not isinstance(current, dict) or not current:
+        raise ValueError("Current weather data is missing.")
+
+    if not isinstance(daily, dict) or not daily.get("time"):
+        raise ValueError("Forecast data is missing.")
+
     temp = current.get("temperature_2m")
-    rain = current.get("rain", 0) or 0
-    humidity = current.get("relative_humidity_2m")
-    wind = current.get("wind_speed_10m")
-    # Transparent heuristic indicators, not official warnings or a validated hazard model.
-    heat = "High" if temp is not None and temp >= 35 else ("Moderate" if temp is not None and temp >= 30 else "Low")
-    wet = "Elevated" if (rain or 0) >= 5 else "Low today"
+    rain = current.get("rain") or 0
+
+    if temp is None:
+        raise ValueError("Current temperature is unavailable.")
+
+    heat = (
+        "High" if temp >= 35
+        else "Moderate" if temp >= 30
+        else "Low"
+    )
+
+    wet = "Elevated" if rain >= 5 else "Low today"
+
     return {
-        "city": city, "state": state, "latitude": lat, "longitude": lon,
-        "current": current, "daily": daily, "heat_risk": heat, "rain_indicator": wet,
-        "fetched_at": datetime.now().strftime("%d %b %Y, %I:%M %p")
+        "city": city,
+        "state": state,
+        "latitude": lat,
+        "longitude": lon,
+        "current": current,
+        "daily": daily,
+        "heat_risk": heat,
+        "rain_indicator": wet,
+        "fetched_at": datetime.now().strftime(
+            "%d %b %Y, %I:%M %p"
+        )
     }
+
+
+# --------------------------------------------------
+# HOME
+# --------------------------------------------------
 
 @app.route("/")
 def index():
-    return render_template("index.html", cities=sorted(CITIES.keys()))
+    return render_template(
+        "index.html",
+        cities=sorted(CITIES.keys())
+    )
+
+
+# --------------------------------------------------
+# WEATHER PAGE
+# --------------------------------------------------
 
 @app.route("/weather")
 def weather():
-    city = request.args.get("city", "Virar")
-    if city not in CITIES:
-        city = "Virar"
+    requested_city = request.args.get("city", "Virar").strip()
+    city = resolve_city(requested_city)
+
+    if city is None:
+        return render_template(
+            "weather.html",
+            report=None,
+            cities=sorted(CITIES.keys()),
+            selected_city=requested_city,
+            error="Please select a valid city from the list."
+        )
+
     try:
         report = weather_for(city)
-        c = report["current"]
+        current = report["current"]
+
         with connect_db() as conn:
-            conn.execute("INSERT INTO searches(city, temperature, humidity, rain, searched_at) VALUES(?,?,?,?,?)",
-                         (city, c.get("temperature_2m"), c.get("relative_humidity_2m"), c.get("rain", 0),
-                          datetime.now().isoformat(timespec="seconds")))
-        return render_template("weather.html", report=report, cities=sorted(CITIES.keys()))
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        return render_template("weather.html", report=None, cities=sorted(CITIES.keys()),
-                               selected_city=city, error="Live weather data could not be loaded. Check your internet connection and try again.")
+            conn.execute(
+                """
+                INSERT INTO searches
+                (city, temperature, humidity, rain, searched_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    city,
+                    current.get("temperature_2m"),
+                    current.get("relative_humidity_2m"),
+                    current.get("rain") or 0,
+                    datetime.now().isoformat(timespec="seconds")
+                )
+            )
+
+        return render_template(
+            "weather.html",
+            report=report,
+            cities=sorted(CITIES.keys()),
+            selected_city=city,
+            error=None
+        )
+
+    except requests.RequestException:
+        app.logger.exception(
+            "Open-Meteo request failed for city: %s", city
+        )
+
+        message = (
+            "The weather service could not be reached. "
+            "Please try again in a moment."
+        )
+
+    except (ValueError, KeyError) as exc:
+        app.logger.exception(
+            "Invalid weather response for city: %s", city
+        )
+        message = "Weather data could not be processed: " + str(exc)
+
+    except sqlite3.Error:
+        app.logger.exception("Database error while saving a search")
+        message = (
+            "Weather was requested, but the search history "
+            "could not be saved. Check the application logs."
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Unexpected weather page error for city: %s", city
+        )
+        message = (
+            "An unexpected error occurred. "
+            "Please try again later."
+        )
+
+    return render_template(
+        "weather.html",
+        report=None,
+        cities=sorted(CITIES.keys()),
+        selected_city=city,
+        error=message
+    )
+
+
+# --------------------------------------------------
+# CITIES API
+# --------------------------------------------------
 
 @app.route("/api/cities")
 def api_cities():
-    return jsonify([{"city": name, "state": vals[2], "lat": vals[0], "lon": vals[1]} for name, vals in CITIES.items()])
+    return jsonify([
+        {
+            "city": name,
+            "state": values[2],
+            "lat": values[0],
+            "lon": values[1]
+        }
+        for name, values in CITIES.items()
+    ])
+
+
+# --------------------------------------------------
+# WEATHER JSON API
+# --------------------------------------------------
 
 @app.route("/api/weather/<city>")
 def api_weather(city):
     try:
-        return jsonify(weather_for(city))
+        report = weather_for(city)
+        return jsonify(report)
+
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
     except requests.RequestException:
-        return jsonify({"error": "Weather provider is temporarily unavailable."}), 502
+        app.logger.exception(
+            "Weather API request failed for city: %s", city
+        )
+        return jsonify({
+            "error": "Weather provider is temporarily unavailable."
+        }), 502
+
+    except Exception:
+        app.logger.exception(
+            "Unexpected API error for city: %s", city
+        )
+        return jsonify({
+            "error": "An unexpected server error occurred."
+        }), 500
+
+
+# --------------------------------------------------
+# CITIZEN REPORTS
+# --------------------------------------------------
 
 @app.route("/report", methods=["GET", "POST"])
 def report_issue():
     if request.method == "POST":
-        city = request.form.get("city", "").strip()
+        city = resolve_city(request.form.get("city", ""))
+
         issue = request.form.get("issue", "").strip()
         details = request.form.get("details", "").strip()
-        if city not in CITIES or issue not in ["Waterlogging/flooding", "Extreme heat", "Water shortage", "Waste/plastic pollution", "Tree/green-space loss", "Other"] or len(details) < 5:
-            flash("Please complete all fields. Details must be at least 5 characters.", "error")
+
+        allowed_issues = [
+            "Waterlogging/flooding",
+            "Extreme heat",
+            "Water shortage",
+            "Waste/plastic pollution",
+            "Tree/green-space loss",
+            "Other"
+        ]
+
+        if (
+            city is None
+            or issue not in allowed_issues
+            or len(details) < 5
+        ):
+            flash(
+                "Please complete all fields. "
+                "Details must contain at least 5 characters.",
+                "error"
+            )
+
         else:
-            with connect_db() as conn:
-                conn.execute("INSERT INTO citizen_reports(city, issue, details, created_at) VALUES(?,?,?,?)",
-                             (city, issue, details[:1200], datetime.now().isoformat(timespec="seconds")))
-            flash("Your sample citizen report has been saved.", "success")
-            return redirect(url_for("report_issue"))
-    return render_template("report.html", cities=sorted(CITIES.keys()))
+            try:
+                with connect_db() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO citizen_reports
+                        (city, issue, details, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            city,
+                            issue,
+                            details[:1200],
+                            datetime.now().isoformat(
+                                timespec="seconds"
+                            )
+                        )
+                    )
+
+                flash(
+                    "Your citizen report has been saved.",
+                    "success"
+                )
+                return redirect(url_for("report_issue"))
+
+            except sqlite3.Error:
+                app.logger.exception("Could not save citizen report")
+                flash(
+                    "The report could not be saved. Please try again.",
+                    "error"
+                )
+
+    return render_template(
+        "report.html",
+        cities=sorted(CITIES.keys())
+    )
+
+
+# --------------------------------------------------
+# DASHBOARD
+# --------------------------------------------------
 
 @app.route("/dashboard")
 def dashboard():
-    with connect_db() as conn:
-        total_searches = conn.execute("SELECT COUNT(*) FROM searches").fetchone()[0]
-        total_reports = conn.execute("SELECT COUNT(*) FROM citizen_reports").fetchone()[0]
-        recent_searches = conn.execute("SELECT * FROM searches ORDER BY id DESC LIMIT 10").fetchall()
-        reports = conn.execute("SELECT * FROM citizen_reports ORDER BY id DESC LIMIT 20").fetchall()
-        city_counts = conn.execute("SELECT city, COUNT(*) AS n FROM searches GROUP BY city ORDER BY n DESC LIMIT 8").fetchall()
-    return render_template("dashboard.html", total_searches=total_searches, total_reports=total_reports,
-                           recent_searches=recent_searches, reports=reports, city_counts=city_counts)
+    try:
+        with connect_db() as conn:
+            total_searches = conn.execute(
+                "SELECT COUNT(*) FROM searches"
+            ).fetchone()[0]
+
+            total_reports = conn.execute(
+                "SELECT COUNT(*) FROM citizen_reports"
+            ).fetchone()[0]
+
+            recent_searches = conn.execute(
+                "SELECT * FROM searches ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+
+            reports = conn.execute(
+                """
+                SELECT * FROM citizen_reports
+                ORDER BY id DESC LIMIT 20
+                """
+            ).fetchall()
+
+            city_counts = conn.execute(
+                """
+                SELECT city, COUNT(*) AS n
+                FROM searches
+                GROUP BY city
+                ORDER BY n DESC
+                LIMIT 8
+                """
+            ).fetchall()
+
+        return render_template(
+            "dashboard.html",
+            total_searches=total_searches,
+            total_reports=total_reports,
+            recent_searches=recent_searches,
+            reports=reports,
+            city_counts=city_counts
+        )
+
+    except sqlite3.Error:
+        app.logger.exception("Dashboard database error")
+        return (
+            "Dashboard database error. Please check the application logs.",
+            500
+        )
+
+
+# --------------------------------------------------
+# CITY COMPARISON
+# --------------------------------------------------
 
 @app.route("/compare")
 def compare():
-    return render_template("compare.html", cities=sorted(CITIES.keys()))
+    return render_template(
+        "compare.html",
+        cities=sorted(CITIES.keys())
+    )
+
+
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "database": "sqlite", "weather_provider": "Open-Meteo"})
+    return jsonify({
+        "status": "ok",
+        "database": "sqlite",
+        "weather_provider": "Open-Meteo"
+    })
 
+
+# Initialize database
 init_db()
 
+
 if __name__ == "__main__":
-    app.run(debug=True, port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
