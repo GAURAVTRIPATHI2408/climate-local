@@ -2,30 +2,27 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import sqlite3
 import os
+import time
 import logging
 import requests
 from datetime import datetime
 
 app = Flask(__name__)
-
 app.secret_key = os.environ.get(
-    "SECRET_KEY",
-    "change-this-secret-before-public-deployment"
+    "SECRET_KEY", "change-this-secret-before-public-deployment"
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 DB_PATH = os.environ.get(
-    "DATABASE_PATH",
-    os.path.join(BASE_DIR, "climatewatch.db")
+    "DATABASE_PATH", os.path.join(BASE_DIR, "climatewatch.db")
 )
 
-# Configure useful logs for Render
 logging.basicConfig(level=logging.INFO)
 
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_CACHE = {}
+WEATHER_CACHE_TTL = 600
 
-# Supported Indian cities and approximate city-centre coordinates
 CITIES = {
     "Mumbai": (19.0760, 72.8777, "Maharashtra"),
     "Virar": (19.4559, 72.8114, "Maharashtra"),
@@ -69,13 +66,8 @@ CITIES = {
 }
 
 
-# --------------------------------------------------
-# DATABASE
-# --------------------------------------------------
-
 def connect_db():
     folder = os.path.dirname(DB_PATH)
-
     if folder:
         os.makedirs(folder, exist_ok=True)
 
@@ -108,17 +100,11 @@ def init_db():
         """)
 
 
-# --------------------------------------------------
-# CITY HELPERS
-# --------------------------------------------------
-
 def resolve_city(city):
-    """Match city names without case-sensitivity or extra spaces."""
     if not city:
         return None
 
     cleaned = city.strip().casefold()
-
     for name in CITIES:
         if name.casefold() == cleaned:
             return name
@@ -126,17 +112,16 @@ def resolve_city(city):
     return None
 
 
-# --------------------------------------------------
-# WEATHER API
-# --------------------------------------------------
-
 def weather_for(city):
     city = resolve_city(city)
-
     if city is None:
-        raise ValueError(
-            "City not found. Please select a supported city."
-        )
+        raise ValueError("Please select a supported city.")
+
+    # Reuse successful weather results for 10 minutes.
+    cached = WEATHER_CACHE.get(city)
+    if cached and time.time() - cached["time"] < WEATHER_CACHE_TTL:
+        app.logger.info("Using cached weather for %s", city)
+        return cached["report"]
 
     lat, lon, state = CITIES[city]
 
@@ -144,39 +129,27 @@ def weather_for(city):
         "latitude": lat,
         "longitude": lon,
         "current": (
-            "temperature_2m,"
-            "relative_humidity_2m,"
-            "apparent_temperature,"
-            "is_day,"
-            "precipitation,"
-            "rain,"
-            "wind_speed_10m,"
-            "weather_code"
+            "temperature_2m,relative_humidity_2m,"
+            "apparent_temperature,is_day,precipitation,rain,"
+            "wind_speed_10m,weather_code"
         ),
         "daily": (
-            "temperature_2m_max,"
-            "temperature_2m_min,"
-            "precipitation_probability_max,"
-            "uv_index_max"
+            "temperature_2m_max,temperature_2m_min,"
+            "precipitation_probability_max,uv_index_max"
         ),
         "timezone": "auto",
-        "forecast_days": 7
+        "forecast_days": 7,
     }
 
-    # Timeout prevents a slow API from blocking the page indefinitely.
     response = requests.get(
         WEATHER_URL,
         params=params,
         timeout=(5, 20),
-        headers={"User-Agent": "ClimateWatchLocal/1.0"}
+        headers={"User-Agent": "ClimateWatchLocal/1.0"},
     )
-
     response.raise_for_status()
 
     data = response.json()
-
-    # Open-Meteo can return an error object even when debugging
-    # a provider response. Validate the required sections.
     if data.get("error"):
         raise ValueError(
             data.get("reason", "Weather provider returned an error.")
@@ -202,10 +175,9 @@ def weather_for(city):
         else "Moderate" if temp >= 30
         else "Low"
     )
-
     wet = "Elevated" if rain >= 5 else "Low today"
 
-    return {
+    report = {
         "city": city,
         "state": state,
         "latitude": lat,
@@ -214,31 +186,25 @@ def weather_for(city):
         "daily": daily,
         "heat_risk": heat,
         "rain_indicator": wet,
-        "fetched_at": datetime.now().strftime(
-            "%d %b %Y, %I:%M %p"
-        )
+        "fetched_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
     }
 
+    WEATHER_CACHE[city] = {
+        "time": time.time(),
+        "report": report,
+    }
 
-# --------------------------------------------------
-# HOME
-# --------------------------------------------------
+    return report
+
 
 @app.route("/")
 def index():
-    return render_template(
-        "index.html",
-        cities=sorted(CITIES.keys())
-    )
+    return render_template("index.html", cities=sorted(CITIES.keys()))
 
-
-# --------------------------------------------------
-# WEATHER PAGE
-# --------------------------------------------------
 
 @app.route("/weather")
 def weather():
-    requested_city = request.args.get("city", "Virar").strip()
+    requested_city = request.args.get("city", "Virar")
     city = resolve_city(requested_city)
 
     if city is None:
@@ -247,7 +213,7 @@ def weather():
             report=None,
             cities=sorted(CITIES.keys()),
             selected_city=requested_city,
-            error="Please select a valid city from the list."
+            error="Please select a valid city from the list.",
         )
 
     try:
@@ -266,8 +232,8 @@ def weather():
                     current.get("temperature_2m"),
                     current.get("relative_humidity_2m"),
                     current.get("rain") or 0,
-                    datetime.now().isoformat(timespec="seconds")
-                )
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
             )
 
         return render_template(
@@ -275,53 +241,49 @@ def weather():
             report=report,
             cities=sorted(CITIES.keys()),
             selected_city=city,
-            error=None
+            error=None,
         )
 
-    except requests.RequestException:
-        app.logger.exception(
-            "Open-Meteo request failed for city: %s", city
-        )
+    except requests.RequestException as exc:
+        app.logger.exception("Weather request failed for %s", city)
 
-        message = (
-            "The weather service could not be reached. "
-            "Please try again in a moment."
-        )
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            if exc.response.status_code == 429:
+                message = (
+                    "Weather provider rate limit reached. "
+                    "Please wait a few minutes before trying again."
+                )
+            else:
+                message = (
+                    "Weather provider returned HTTP "
+                    f"{exc.response.status_code}. Please try again later."
+                )
+        else:
+            message = (
+                "Weather provider could not be reached. "
+                "Please try again later."
+            )
 
     except (ValueError, KeyError) as exc:
-        app.logger.exception(
-            "Invalid weather response for city: %s", city
-        )
-        message = "Weather data could not be processed: " + str(exc)
+        app.logger.exception("Weather response error for %s", city)
+        message = f"Weather data could not be processed: {str(exc)[:200]}"
 
     except sqlite3.Error:
-        app.logger.exception("Database error while saving a search")
-        message = (
-            "Weather was requested, but the search history "
-            "could not be saved. Check the application logs."
-        )
+        app.logger.exception("Database error while saving search")
+        message = "Weather data was received, but search history could not be saved."
 
     except Exception:
-        app.logger.exception(
-            "Unexpected weather page error for city: %s", city
-        )
-        message = (
-            "An unexpected error occurred. "
-            "Please try again later."
-        )
+        app.logger.exception("Unexpected weather page error")
+        message = "An unexpected error occurred. Please try again later."
 
     return render_template(
         "weather.html",
         report=None,
         cities=sorted(CITIES.keys()),
         selected_city=city,
-        error=message
+        error=message,
     )
 
-
-# --------------------------------------------------
-# CITIES API
-# --------------------------------------------------
 
 @app.route("/api/cities")
 def api_cities():
@@ -330,51 +292,42 @@ def api_cities():
             "city": name,
             "state": values[2],
             "lat": values[0],
-            "lon": values[1]
+            "lon": values[1],
         }
         for name, values in CITIES.items()
     ])
 
 
-# --------------------------------------------------
-# WEATHER JSON API
-# --------------------------------------------------
-
 @app.route("/api/weather/<city>")
 def api_weather(city):
     try:
-        report = weather_for(city)
-        return jsonify(report)
+        return jsonify(weather_for(city))
 
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    except requests.RequestException:
-        app.logger.exception(
-            "Weather API request failed for city: %s", city
-        )
+    except requests.RequestException as exc:
+        app.logger.exception("Weather API request failed for %s", city)
+
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            if exc.response.status_code == 429:
+                return jsonify({
+                    "error": "Weather provider rate limit reached. Try again later."
+                }), 429
+
         return jsonify({
             "error": "Weather provider is temporarily unavailable."
         }), 502
 
     except Exception:
-        app.logger.exception(
-            "Unexpected API error for city: %s", city
-        )
-        return jsonify({
-            "error": "An unexpected server error occurred."
-        }), 500
+        app.logger.exception("Unexpected weather API error")
+        return jsonify({"error": "Unexpected server error."}), 500
 
-
-# --------------------------------------------------
-# CITIZEN REPORTS
-# --------------------------------------------------
 
 @app.route("/report", methods=["GET", "POST"])
 def report_issue():
     if request.method == "POST":
         city = resolve_city(request.form.get("city", ""))
-
         issue = request.form.get("issue", "").strip()
         details = request.form.get("details", "").strip()
 
@@ -384,20 +337,14 @@ def report_issue():
             "Water shortage",
             "Waste/plastic pollution",
             "Tree/green-space loss",
-            "Other"
+            "Other",
         ]
 
-        if (
-            city is None
-            or issue not in allowed_issues
-            or len(details) < 5
-        ):
+        if city is None or issue not in allowed_issues or len(details) < 5:
             flash(
-                "Please complete all fields. "
-                "Details must contain at least 5 characters.",
-                "error"
+                "Please complete all fields. Details must contain at least 5 characters.",
+                "error",
             )
-
         else:
             try:
                 with connect_db() as conn:
@@ -411,34 +358,19 @@ def report_issue():
                             city,
                             issue,
                             details[:1200],
-                            datetime.now().isoformat(
-                                timespec="seconds"
-                            )
-                        )
+                            datetime.now().isoformat(timespec="seconds"),
+                        ),
                     )
 
-                flash(
-                    "Your citizen report has been saved.",
-                    "success"
-                )
+                flash("Your citizen report has been saved.", "success")
                 return redirect(url_for("report_issue"))
 
             except sqlite3.Error:
                 app.logger.exception("Could not save citizen report")
-                flash(
-                    "The report could not be saved. Please try again.",
-                    "error"
-                )
+                flash("The report could not be saved. Please try again.", "error")
 
-    return render_template(
-        "report.html",
-        cities=sorted(CITIES.keys())
-    )
+    return render_template("report.html", cities=sorted(CITIES.keys()))
 
-
-# --------------------------------------------------
-# DASHBOARD
-# --------------------------------------------------
 
 @app.route("/dashboard")
 def dashboard():
@@ -457,10 +389,7 @@ def dashboard():
             ).fetchall()
 
             reports = conn.execute(
-                """
-                SELECT * FROM citizen_reports
-                ORDER BY id DESC LIMIT 20
-                """
+                "SELECT * FROM citizen_reports ORDER BY id DESC LIMIT 20"
             ).fetchall()
 
             city_counts = conn.execute(
@@ -479,43 +408,28 @@ def dashboard():
             total_reports=total_reports,
             recent_searches=recent_searches,
             reports=reports,
-            city_counts=city_counts
+            city_counts=city_counts,
         )
 
     except sqlite3.Error:
         app.logger.exception("Dashboard database error")
-        return (
-            "Dashboard database error. Please check the application logs.",
-            500
-        )
+        return "Dashboard database error. Check application logs.", 500
 
-
-# --------------------------------------------------
-# CITY COMPARISON
-# --------------------------------------------------
 
 @app.route("/compare")
 def compare():
-    return render_template(
-        "compare.html",
-        cities=sorted(CITIES.keys())
-    )
+    return render_template("compare.html", cities=sorted(CITIES.keys()))
 
-
-# --------------------------------------------------
-# HEALTH CHECK
-# --------------------------------------------------
 
 @app.route("/health")
 def health():
     return jsonify({
         "status": "ok",
         "database": "sqlite",
-        "weather_provider": "Open-Meteo"
+        "weather_provider": "Open-Meteo",
     })
 
 
-# Initialize database
 init_db()
 
 
