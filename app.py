@@ -1,11 +1,13 @@
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-import sqlite3
-import os
-import time
+import json
 import logging
-import requests
+import os
+import sqlite3
+import time
 from datetime import datetime
+
+import requests
 
 app = Flask(__name__)
 app.secret_key = os.environ.get(
@@ -14,14 +16,19 @@ app.secret_key = os.environ.get(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get(
-    "DATABASE_PATH", os.path.join(BASE_DIR, "climatewatch.db")
+    "DATABASE_PATH",
+    os.path.join(BASE_DIR, "climatewatch.db")
 )
 
 logging.basicConfig(level=logging.INFO)
 
 WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
-WEATHER_CACHE = {}
-WEATHER_CACHE_TTL = 600
+
+# Reuse successful weather data for 30 minutes.
+WEATHER_CACHE_TTL = 30 * 60
+
+# Stop repeated requests after a rate-limit error.
+DEFAULT_RATE_LIMIT_COOLDOWN = 10 * 60
 
 CITIES = {
     "Mumbai": (19.0760, 72.8777, "Maharashtra"),
@@ -66,12 +73,19 @@ CITIES = {
 }
 
 
+class WeatherProviderUnavailable(Exception):
+    def __init__(self, message, status_code=502):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def connect_db():
     folder = os.path.dirname(DB_PATH)
+
     if folder:
         os.makedirs(folder, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -99,12 +113,30 @@ def init_db():
             )
         """)
 
+        # Persistent weather cache.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS weather_cache (
+                city TEXT PRIMARY KEY,
+                fetched_epoch REAL NOT NULL,
+                report_json TEXT NOT NULL
+            )
+        """)
+
+        # Shared API cooldown.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL
+            )
+        """)
+
 
 def resolve_city(city):
     if not city:
         return None
 
     cleaned = city.strip().casefold()
+
     for name in CITIES:
         if name.casefold() == cleaned:
             return name
@@ -112,16 +144,141 @@ def resolve_city(city):
     return None
 
 
+def get_cached_weather(city):
+    try:
+        with connect_db() as conn:
+            row = conn.execute(
+                """
+                SELECT fetched_epoch, report_json
+                FROM weather_cache
+                WHERE city = ?
+                """,
+                (city,),
+            ).fetchone()
+
+        if row is None:
+            return None, None
+
+        report = json.loads(row["report_json"])
+
+        return float(row["fetched_epoch"]), report
+
+    except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+        app.logger.exception("Could not read cache for %s", city)
+        return None, None
+
+
+def save_cached_weather(city, report):
+    try:
+        with connect_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO weather_cache
+                    (city, fetched_epoch, report_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(city) DO UPDATE SET
+                    fetched_epoch = excluded.fetched_epoch,
+                    report_json = excluded.report_json
+                """,
+                (city, time.time(), json.dumps(report)),
+            )
+
+    except sqlite3.Error:
+        app.logger.exception("Could not save cache for %s", city)
+
+
+def get_cooldown_until():
+    try:
+        with connect_db() as conn:
+            row = conn.execute(
+                """
+                SELECT state_value
+                FROM app_state
+                WHERE state_key = 'weather_cooldown_until'
+                """
+            ).fetchone()
+
+        return float(row[0]) if row else 0.0
+
+    except (sqlite3.Error, ValueError, TypeError):
+        app.logger.exception("Could not read API cooldown")
+        return 0.0
+
+
+def set_cooldown(seconds):
+    cooldown_until = time.time() + max(1, seconds)
+
+    try:
+        with connect_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_state (state_key, state_value)
+                VALUES ('weather_cooldown_until', ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    state_value = excluded.state_value
+                """,
+                (str(cooldown_until),),
+            )
+
+    except sqlite3.Error:
+        app.logger.exception("Could not save API cooldown")
+
+    return cooldown_until
+
+
+def stale_report(report, fetched_epoch):
+    # Never pretend saved data is live.
+    result = dict(report)
+    result["is_stale"] = True
+    result["cache_notice"] = (
+        "Live weather is temporarily unavailable. "
+        "Showing the last saved weather data."
+    )
+    result["fetched_at"] = datetime.fromtimestamp(
+        fetched_epoch
+    ).strftime("%d %b %Y, %I:%M %p")
+
+    return result
+
+
 def weather_for(city):
     city = resolve_city(city)
+
     if city is None:
         raise ValueError("Please select a supported city.")
 
-    # Reuse successful weather results for 10 minutes.
-    cached = WEATHER_CACHE.get(city)
-    if cached and time.time() - cached["time"] < WEATHER_CACHE_TTL:
+    cached_epoch, cached_report = get_cached_weather(city)
+    now = time.time()
+
+    # Use recent cached data without calling the provider.
+    if (
+        cached_report
+        and cached_epoch
+        and now - cached_epoch < WEATHER_CACHE_TTL
+    ):
+        report = dict(cached_report)
+        report["is_stale"] = False
+        report["cache_notice"] = None
+
         app.logger.info("Using cached weather for %s", city)
-        return cached["report"]
+        return report
+
+    # Avoid repeated API requests during the cooldown.
+    cooldown_until = get_cooldown_until()
+
+    if cooldown_until > now:
+        if cached_report and cached_epoch:
+            return stale_report(cached_report, cached_epoch)
+
+        wait_minutes = max(
+            1, int((cooldown_until - now + 59) // 60)
+        )
+
+        raise WeatherProviderUnavailable(
+            "Weather provider is rate-limited. "
+            f"Please try again in about {wait_minutes} minute(s).",
+            status_code=429,
+        )
 
     lat, lon, state = CITIES[city]
 
@@ -141,15 +298,68 @@ def weather_for(city):
         "forecast_days": 7,
     }
 
-    response = requests.get(
-        WEATHER_URL,
-        params=params,
-        timeout=(5, 20),
-        headers={"User-Agent": "ClimateWatchLocal/1.0"},
-    )
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            WEATHER_URL,
+            params=params,
+            timeout=(5, 20),
+            headers={"User-Agent": "ClimateWatchLocal/1.0"},
+        )
 
-    data = response.json()
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+
+            try:
+                cooldown_seconds = (
+                    max(
+                        DEFAULT_RATE_LIMIT_COOLDOWN,
+                        int(retry_after),
+                    )
+                    if retry_after
+                    else DEFAULT_RATE_LIMIT_COOLDOWN
+                )
+            except (TypeError, ValueError):
+                cooldown_seconds = DEFAULT_RATE_LIMIT_COOLDOWN
+
+            cooldown_until = set_cooldown(cooldown_seconds)
+
+            if cached_report and cached_epoch:
+                app.logger.warning(
+                    "Rate limited; using saved weather for %s", city
+                )
+                return stale_report(cached_report, cached_epoch)
+
+            wait_minutes = max(
+                1, int((cooldown_until - time.time() + 59) // 60)
+            )
+
+            raise WeatherProviderUnavailable(
+                "Weather provider rate limit reached. "
+                f"Please wait about {wait_minutes} minute(s) "
+                "before trying again.",
+                status_code=429,
+            )
+
+        response.raise_for_status()
+        data = response.json()
+
+    except WeatherProviderUnavailable:
+        raise
+
+    except requests.RequestException as exc:
+        app.logger.warning(
+            "Open-Meteo request failed for %s: %s", city, exc
+        )
+
+        if cached_report and cached_epoch:
+            return stale_report(cached_report, cached_epoch)
+
+        raise WeatherProviderUnavailable(
+            "Weather provider is temporarily unavailable. "
+            "Please try again later.",
+            status_code=502,
+        ) from exc
+
     if data.get("error"):
         raise ValueError(
             data.get("reason", "Weather provider returned an error.")
@@ -170,13 +380,6 @@ def weather_for(city):
     if temp is None:
         raise ValueError("Current temperature is unavailable.")
 
-    heat = (
-        "High" if temp >= 35
-        else "Moderate" if temp >= 30
-        else "Low"
-    )
-    wet = "Elevated" if rain >= 5 else "Low today"
-
     report = {
         "city": city,
         "state": state,
@@ -184,22 +387,27 @@ def weather_for(city):
         "longitude": lon,
         "current": current,
         "daily": daily,
-        "heat_risk": heat,
-        "rain_indicator": wet,
+        "heat_risk": (
+            "High" if temp >= 35
+            else "Moderate" if temp >= 30
+            else "Low"
+        ),
+        "rain_indicator": "Elevated" if rain >= 5 else "Low today",
         "fetched_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "is_stale": False,
+        "cache_notice": None,
     }
 
-    WEATHER_CACHE[city] = {
-        "time": time.time(),
-        "report": report,
-    }
-
+    save_cached_weather(city, report)
     return report
 
 
 @app.route("/")
 def index():
-    return render_template("index.html", cities=sorted(CITIES.keys()))
+    return render_template(
+        "index.html",
+        cities=sorted(CITIES.keys()),
+    )
 
 
 @app.route("/weather")
@@ -224,7 +432,7 @@ def weather():
             conn.execute(
                 """
                 INSERT INTO searches
-                (city, temperature, humidity, rain, searched_at)
+                    (city, temperature, humidity, rain, searched_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
@@ -244,25 +452,14 @@ def weather():
             error=None,
         )
 
-    except requests.RequestException as exc:
-        app.logger.exception("Weather request failed for %s", city)
-
-        if isinstance(exc, requests.HTTPError) and exc.response is not None:
-            if exc.response.status_code == 429:
-                message = (
-                    "Weather provider rate limit reached. "
-                    "Please wait a few minutes before trying again."
-                )
-            else:
-                message = (
-                    "Weather provider returned HTTP "
-                    f"{exc.response.status_code}. Please try again later."
-                )
-        else:
-            message = (
-                "Weather provider could not be reached. "
-                "Please try again later."
-            )
+    except WeatherProviderUnavailable as exc:
+        return render_template(
+            "weather.html",
+            report=None,
+            cities=sorted(CITIES.keys()),
+            selected_city=city,
+            error=str(exc),
+        )
 
     except (ValueError, KeyError) as exc:
         app.logger.exception("Weather response error for %s", city)
@@ -270,7 +467,10 @@ def weather():
 
     except sqlite3.Error:
         app.logger.exception("Database error while saving search")
-        message = "Weather data was received, but search history could not be saved."
+        message = (
+            "Weather data was received, but search history "
+            "could not be saved."
+        )
 
     except Exception:
         app.logger.exception("Unexpected weather page error")
@@ -306,21 +506,11 @@ def api_weather(city):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    except requests.RequestException as exc:
-        app.logger.exception("Weather API request failed for %s", city)
-
-        if isinstance(exc, requests.HTTPError) and exc.response is not None:
-            if exc.response.status_code == 429:
-                return jsonify({
-                    "error": "Weather provider rate limit reached. Try again later."
-                }), 429
-
-        return jsonify({
-            "error": "Weather provider is temporarily unavailable."
-        }), 502
+    except WeatherProviderUnavailable as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
 
     except Exception:
-        app.logger.exception("Unexpected weather API error")
+        app.logger.exception("Unexpected weather API error for %s", city)
         return jsonify({"error": "Unexpected server error."}), 500
 
 
@@ -342,7 +532,8 @@ def report_issue():
 
         if city is None or issue not in allowed_issues or len(details) < 5:
             flash(
-                "Please complete all fields. Details must contain at least 5 characters.",
+                "Please complete all fields. "
+                "Details must contain at least 5 characters.",
                 "error",
             )
         else:
@@ -351,7 +542,7 @@ def report_issue():
                     conn.execute(
                         """
                         INSERT INTO citizen_reports
-                        (city, issue, details, created_at)
+                            (city, issue, details, created_at)
                         VALUES (?, ?, ?, ?)
                         """,
                         (
@@ -367,9 +558,15 @@ def report_issue():
 
             except sqlite3.Error:
                 app.logger.exception("Could not save citizen report")
-                flash("The report could not be saved. Please try again.", "error")
+                flash(
+                    "The report could not be saved. Please try again.",
+                    "error",
+                )
 
-    return render_template("report.html", cities=sorted(CITIES.keys()))
+    return render_template(
+        "report.html",
+        cities=sorted(CITIES.keys()),
+    )
 
 
 @app.route("/dashboard")
@@ -418,7 +615,10 @@ def dashboard():
 
 @app.route("/compare")
 def compare():
-    return render_template("compare.html", cities=sorted(CITIES.keys()))
+    return render_template(
+        "compare.html",
+        cities=sorted(CITIES.keys()),
+    )
 
 
 @app.route("/health")
